@@ -1,6 +1,6 @@
 """
-Clinical Grade Real-Time ECG AI Monitoring System
-Author: Vaibhav Krishna V | NMIT Bengaluru | 1NT22EC182
+Clinical Grade Real Time ECG AI Monitoring System
+Author: Vaibhav Krishna V
 """
 
 import numpy as np
@@ -258,7 +258,7 @@ def run_monitor(record_id="100"):
 if __name__ == "__main__":
     record = sys.argv[1] if len(sys.argv) > 1 else "100"
     print("=" * 55)
-    print("  Clinical Grade Real-Time ECG AI Monitor")
-    print("  Author: Vaibhav Krishna V | NMIT | 1NT22EC182")
+    print("  Clinical Grade Real Time ECG AI Monitor")
+    print("  Author: Vaibhav Krishna V  ")
     print("=" * 55)
     run_monitor(record_id=record)
