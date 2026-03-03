@@ -3,262 +3,240 @@ Clinical Grade Real Time ECG AI Monitoring System
 Author: Vaibhav Krishna V
 """
 
-import numpy as np
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import wfdb
-from scipy.signal import butter, filtfilt
+import numpy as np
 import tensorflow as tf
-from tensorflow import keras
-import sys
-import time
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtWidgets
+from scipy.signal import butter, filtfilt, find_peaks
+import threading, queue, time
+from datetime import datetime
 
-# ─────────────────────────────────────────
-# CONFIGURATION
-# ─────────────────────────────────────────
-SAMPLE_RATE       = 360          # MIT-BIH sampling frequency (Hz)
-WINDOW_SIZE       = 1800         # 5-second sliding window (samples)
-STEP_SIZE         = 360          # Slide by 1 second
-BEAT_WINDOW       = 72           # Samples per heartbeat segment (~0.2s)
-TACHYCARDIA_BPM   = 100
-BRADYCARDIA_BPM   = 60
-MODEL_SAVE_PATH   = "ecg_model.h5"
+# ================= CONFIG =================
+FS = 360
+WINDOW_SEC = 4
+WINDOW = FS * WINDOW_SEC
+MODEL_PATH = "ecg_clinical_cpu.keras"
+PATIENTS = ["100", "101"]
 
-# MIT-BIH records to stream
-RECORDS = ["100", "101", "103", "105", "106", "108"]
+CLASSES = ["Normal", "PVC", "AFib", "Other"]
 
-# ─────────────────────────────────────────
-# SIGNAL PROCESSING
-# ─────────────────────────────────────────
+TACHY = 120
+BRADY = 45
 
-def bandpass_filter(signal, lowcut=0.5, highcut=40.0, fs=SAMPLE_RATE, order=4):
-    """Remove baseline wander (low-freq) and noise (high-freq)."""
-    nyq = 0.5 * fs
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = butter(order, [low, high], btype='band')
-    return filtfilt(b, a, signal)
+model_lock = threading.Lock()
 
+# ================= FILTER =================
+def bandpass(sig):
+    nyq = 0.5 * FS
+    b, a = butter(2, [0.5/nyq, 40/nyq], btype="band")
+    return filtfilt(b, a, sig)
 
-def detect_r_peaks(filtered_signal, fs=SAMPLE_RATE):
-    """
-    Adaptive R-peak detection using normalized signal + threshold.
-    Returns list of sample indices where R-peaks occur.
-    """
-    # Normalize signal
-    norm = (filtered_signal - np.mean(filtered_signal)) / (np.std(filtered_signal) + 1e-8)
-    
-    # Adaptive threshold: mean + 0.6 * std of positive peaks
-    threshold = np.mean(norm) + 0.6 * np.std(norm)
-    
-    peaks = []
-    min_distance = int(0.2 * fs)  # Minimum 200ms between beats (300 BPM max)
-    last_peak = -min_distance
+# ================= R PEAK DETECTION =================
+def detect_rpeaks(ecg):
+    s = (ecg - np.mean(ecg)) / (np.std(ecg)+1e-6)
+    energy = s**2
+    kernel = np.ones(int(0.08*FS))/(0.08*FS)
+    energy = np.convolve(energy, kernel, mode="same")
 
-    for i in range(1, len(norm) - 1):
-        if (norm[i] > threshold and
-                norm[i] > norm[i - 1] and
-                norm[i] > norm[i + 1] and
-                (i - last_peak) > min_distance):
-            peaks.append(i)
-            last_peak = i
-
-    return np.array(peaks)
-
-
-# ─────────────────────────────────────────
-# FEATURE EXTRACTION
-# ─────────────────────────────────────────
-
-def extract_features(r_peaks, fs=SAMPLE_RATE):
-    """
-    Compute RR intervals, heart rate, and HRV from detected peaks.
-    Returns dict of physiological metrics.
-    """
-    if len(r_peaks) < 2:
-        return {"heart_rate": 0, "rr_mean": 0, "rr_std": 0, "hrv": 0}
-
-    rr_intervals = np.diff(r_peaks) / fs  # In seconds
-    rr_ms        = rr_intervals * 1000     # In milliseconds
-    heart_rate   = 60.0 / np.mean(rr_intervals) if np.mean(rr_intervals) > 0 else 0
-
-    return {
-        "heart_rate": round(heart_rate, 1),
-        "rr_mean":    round(np.mean(rr_ms), 1),
-        "rr_std":     round(np.std(rr_ms), 1),
-        "hrv":        round(np.sqrt(np.mean(np.diff(rr_ms) ** 2)), 1)  # RMSSD
-    }
-
-
-# ─────────────────────────────────────────
-# LIGHTWEIGHT CNN MODEL
-# ─────────────────────────────────────────
-
-def build_model(input_length=BEAT_WINDOW, num_classes=2):
-    """
-    Compact 1D CNN optimized for CPU inference.
-    Input:  single ECG beat segment (BEAT_WINDOW samples)
-    Output: class probabilities [Normal, Arrhythmic]
-    """
-    model = keras.Sequential([
-        keras.layers.Input(shape=(input_length, 1)),
-
-        # Block 1
-        keras.layers.Conv1D(16, kernel_size=5, activation='relu', padding='same'),
-        keras.layers.BatchNormalization(),
-        keras.layers.MaxPooling1D(pool_size=2),
-
-        # Block 2
-        keras.layers.Conv1D(32, kernel_size=3, activation='relu', padding='same'),
-        keras.layers.BatchNormalization(),
-        keras.layers.MaxPooling1D(pool_size=2),
-
-        # Block 3
-        keras.layers.Conv1D(64, kernel_size=3, activation='relu', padding='same'),
-        keras.layers.GlobalAveragePooling1D(),
-
-        # Classifier head
-        keras.layers.Dense(32, activation='relu'),
-        keras.layers.Dropout(0.3),
-        keras.layers.Dense(num_classes, activation='softmax')
-    ], name="ECG_Classifier")
-
-    model.compile(
-        optimizer='adam',
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
+    peaks,_ = find_peaks(
+        energy,
+        distance=int(0.3*FS),   # refractory period
+        prominence=np.std(energy)
     )
+    return peaks
+
+# ================= CLINICAL HR =================
+def compute_hr(peaks):
+    if len(peaks) < 3:
+        return 0, []
+
+    rr = np.diff(peaks) / FS
+    rr = rr[rr > 0.3]  # remove impossible beats
+
+    if len(rr) < 2:
+        return 0, []
+
+    rr_med = np.median(rr)
+    hr = 60 / rr_med
+    hr = np.clip(hr, 30, 180)
+    return hr, rr
+
+# ================= HRV =================
+def hrv(rr):
+    if len(rr) < 3:
+        return 0,0
+    sdnn = np.std(rr)
+    rmssd = np.sqrt(np.mean(np.diff(rr)**2))
+    return sdnn, rmssd
+
+# ================= AFIB =================
+def detect_afib(rr):
+    sdnn, rmssd = hrv(rr)
+    return sdnn > 0.12 and rmssd > 0.1
+
+# ================= MODEL =================
+def build_model():
+    inp = tf.keras.Input(shape=(360,1))
+    x = tf.keras.layers.Conv1D(32,5,activation="relu")(inp)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.MaxPooling1D(2)(x)
+
+    x = tf.keras.layers.Conv1D(64,5,activation="relu")(x)
+    x = tf.keras.layers.GlobalAveragePooling1D()(x)
+
+    x = tf.keras.layers.Dense(64,activation="relu")(x)
+    out = tf.keras.layers.Dense(4,activation="softmax")(x)
+
+    model = tf.keras.Model(inp,out)
+    model.compile("adam","categorical_crossentropy",metrics=["accuracy"])
     return model
 
+def map_label(sym):
+    return 0 if sym=="N" else (1 if sym=="V" else (2 if sym=="A" else 3))
 
-def extract_beat_segments(signal, r_peaks, half_window=BEAT_WINDOW // 2):
-    """Slice fixed-length beat windows centered on each R-peak."""
-    segments = []
-    labels   = []
-    for peak in r_peaks:
-        start = peak - half_window
-        end   = peak + half_window
-        if start >= 0 and end <= len(signal):
-            segment = signal[start:end]
-            segments.append(segment)
-            labels.append(0)  # Placeholder label (Normal)
-    return np.array(segments), np.array(labels)
+def load_or_train():
+    if os.path.exists(MODEL_PATH):
+        return tf.keras.models.load_model(MODEL_PATH)
 
-
-def train_model(model, segments, labels, epochs=6):
-    """Train the lightweight CNN on extracted beat segments."""
-    X = segments.reshape(-1, BEAT_WINDOW, 1).astype(np.float32)
-    # Normalize per-sample
-    X = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, keepdims=True) + 1e-8)
     print("Training clinical CPU model...")
-    model.fit(X, labels, epochs=epochs, batch_size=32, verbose=1)
-    model.save(MODEL_SAVE_PATH)
-    print(f"Model saved → {MODEL_SAVE_PATH}")
+    X,y = [],[]
+
+    records = ["100","101","102","103","104","105","106"]
+
+    for rec in records:
+        r = wfdb.rdrecord(rec,pn_dir="mitdb")
+        ann = wfdb.rdann(rec,"atr",pn_dir="mitdb")
+        sig = r.p_signal[:,0]
+
+        for i,p in enumerate(ann.sample):
+            if p-180 < 0 or p+180 > len(sig): continue
+            beat = sig[p-180:p+180]
+            X.append(beat)
+            y.append(map_label(ann.symbol[i]))
+
+    X = np.array(X).reshape(-1,360,1)
+    y = tf.keras.utils.to_categorical(y,4)
+
+    model = build_model()
+    model.fit(X,y,epochs=6,batch_size=128,verbose=1)
+    model.save(MODEL_PATH)
     return model
 
+model = load_or_train()
 
-# ─────────────────────────────────────────
-# HYBRID CLINICAL VALIDATOR
-# ─────────────────────────────────────────
+# ================= THREAD =================
+class PatientThread(threading.Thread):
+    def __init__(self, name, q):
+        super().__init__()
+        self.name = name
+        self.q = q
+        self.running = True
 
-def hybrid_validate(ai_label, ai_confidence, heart_rate):
-    """
-    Combine AI prediction with deterministic clinical rules.
-    Clinical rules override uncertain AI predictions.
-    """
-    # Override with hard clinical rules
-    if heart_rate > TACHYCARDIA_BPM:
-        return "Tachycardia", 1.0, "Clinical Rule"
-    elif heart_rate < BRADYCARDIA_BPM and heart_rate > 0:
-        return "Bradycardia", 1.0, "Clinical Rule"
+    def run(self):
+        record = wfdb.rdrecord(self.name,pn_dir="mitdb",sampto=30000)
+        sig = bandpass(record.p_signal[:,0])
+        ptr = 0
 
-    # Trust AI if confidence is high
-    if ai_confidence > 0.75:
-        label = "Normal" if ai_label == 0 else "Arrhythmic"
-        return label, ai_confidence, "AI Model"
+        while self.running and ptr+WINDOW < len(sig):
+            window = sig[ptr:ptr+WINDOW]
 
-    # Low-confidence AI → fallback to Normal (conservative)
-    return "Normal (Low Confidence)", ai_confidence, "Fallback"
+            peaks = detect_rpeaks(window)
+            hr, rr = compute_hr(peaks)
 
+            center = window[len(window)//2-180:len(window)//2+180]
 
-# ─────────────────────────────────────────
-# REAL-TIME MONITORING PIPELINE
-# ─────────────────────────────────────────
+            self.q.put((self.name, window, peaks, hr, rr, center))
+            ptr += FS
+            time.sleep(0.25)
 
-def load_ecg_record(record_id):
-    """Download and return ECG signal from MIT-BIH database."""
-    print(f"\nLoading record {record_id} from MIT-BIH...")
-    record = wfdb.rdrecord(record_id, pn_dir='mitdb')
-    signal = record.p_signal[:, 0]  # Lead II
-    print(f"  Loaded {len(signal)} samples @ {SAMPLE_RATE} Hz")
-    return signal
+# ================= DASHBOARD =================
+class ECGDashboard:
+    def __init__(self, patients):
+        self.app = QtWidgets.QApplication([])
+        self.win = pg.GraphicsLayoutWidget(title="🏥 Clinical ECG AI Monitor")
+        self.win.resize(1500,900)
+        self.win.show()
 
+        self.queue = queue.Queue()
+        self.curves = {}
+        self.peaks = {}
+        self.labels = {}
+        self.threads = []
 
-def run_monitor(record_id="100"):
-    """Main real-time monitoring loop for a single ECG record."""
-    # Load signal
-    raw_signal = load_ecg_record(record_id)
+        for i,p in enumerate(patients):
+            plot = self.win.addPlot(row=i,col=0,title=f"Patient {p}")
+            plot.setYRange(-2,2)
 
-    # Filter
-    filtered = bandpass_filter(raw_signal)
+            curve = plot.plot(pen=pg.mkPen("#00ffaa",width=2))
+            peakp = plot.plot(symbol="o",pen=None,symbolBrush="r")
 
-    # Detect R-peaks on full signal (for training data)
-    all_peaks = detect_r_peaks(filtered)
-    print(f"  Detected {len(all_peaks)} R-peaks")
+            self.curves[p] = curve
+            self.peaks[p] = peakp
 
-    # Extract beat segments and train model
-    segments, labels = extract_beat_segments(filtered, all_peaks)
-    model = build_model()
-    if len(segments) > 10:
-        model = train_model(model, segments, labels)
-    else:
-        print("  Not enough segments to train. Using untrained model.")
+            label = pg.LabelItem(justify="left")
+            self.win.addItem(label,row=i,col=1)
+            self.labels[p] = label
 
-    # ── Streaming simulation ──────────────────────────────────────
-    print(f"\n{'='*55}")
-    print(f"  REAL-TIME MONITORING — Record {record_id}")
-    print(f"{'='*55}")
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update)
+        self.timer.start(150)
 
-    window_count = 0
-    for start in range(0, len(filtered) - WINDOW_SIZE, STEP_SIZE):
-        window       = filtered[start : start + WINDOW_SIZE]
-        peaks_in_win = detect_r_peaks(window)
-        features     = extract_features(peaks_in_win)
-        hr           = features["heart_rate"]
+        for p in patients:
+            t = PatientThread(p,self.queue)
+            t.start()
+            self.threads.append(t)
 
-        # AI classification on most recent beat
-        ai_label, ai_conf = 0, 0.5
-        if len(peaks_in_win) > 0:
-            peak = peaks_in_win[-1]
-            hw   = BEAT_WINDOW // 2
-            if peak - hw >= 0 and peak + hw <= len(window):
-                beat = window[peak - hw : peak + hw].reshape(1, BEAT_WINDOW, 1).astype(np.float32)
-                beat = (beat - beat.mean()) / (beat.std() + 1e-8)
-                probs    = model.predict(beat, verbose=0)[0]
-                ai_label = int(np.argmax(probs))
-                ai_conf  = float(np.max(probs))
+    def update(self):
+        while not self.queue.empty():
+            patient, window, peaks, hr, rr, center = self.queue.get()
 
-        # Hybrid validation
-        rhythm, confidence, source = hybrid_validate(ai_label, ai_conf, hr)
+            x = np.linspace(0,len(window)/FS,len(window))
+            self.curves[patient].setData(x,window)
 
-        window_count += 1
-        status = "⚠ ALERT" if rhythm not in ("Normal", "Normal (Low Confidence)") else "✓ Stable"
+            if len(peaks):
+                self.peaks[patient].setData(x[peaks],window[peaks])
 
-        print(f"  Window {window_count:03d} | HR: {hr:5.1f} BPM | "
-              f"Rhythm: {rhythm:<28} | Conf: {confidence:.0%} | "
-              f"Source: {source:<15} | {status}")
+            # ===== AI Inference =====
+            with model_lock:
+                pred = model.predict(center.reshape(1,360,1),verbose=0)[0]
 
-        time.sleep(0.05)  # Simulate real-time pacing
+            conf = np.max(pred)*100
+            rhythm = CLASSES[np.argmax(pred)]
 
-    print(f"\n  Monitoring complete. {window_count} windows processed.")
+            # ===== Clinical Logic =====
+            alarm = None
 
+            if detect_afib(rr):
+                alarm = "AFIB"
 
-# ─────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────
+            if hr > TACHY and rhythm != "Normal":
+                alarm = "TACHYCARDIA"
 
+            if 0 < hr < BRADY:
+                alarm = "BRADYCARDIA"
+
+            # Color coding
+            color = "#ff3333" if alarm else "#00ffaa"
+            self.curves[patient].setPen(pg.mkPen(color,width=2))
+
+            # ===== Label =====
+            self.labels[patient].setText(f"""
+            <span style='font-size:14pt'>
+            HR: {hr:.1f} bpm<br>
+            Rhythm: {rhythm}<br>
+            Confidence: {conf:.1f}%<br>
+            Status: {alarm if alarm else "Stable"}
+            </span>
+            """)
+
+    def run(self):
+        self.app.exec_()
+
+# ================= MAIN =================
 if __name__ == "__main__":
-    record = sys.argv[1] if len(sys.argv) > 1 else "100"
-    print("=" * 55)
-    print("  Clinical Grade Real Time ECG AI Monitor")
-    print("  Author: Vaibhav Krishna V  ")
-    print("=" * 55)
-    run_monitor(record_id=record)
+    dash = ECGDashboard(PATIENTS)
+    dash.run()
