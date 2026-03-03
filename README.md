@@ -143,9 +143,21 @@ ecg-ai-monitor/
 
 ---
 
-## Applications
+## Industrial Applications
 
-Portable cardiac monitoring devices, edge AI healthcare platforms, remote patient monitoring, continuous monitoring for elderly patients, low resource clinical environments where GPU hardware is not available.
+- Portable ECG monitoring devices and wearable diagnostics
+- Edge AI healthcare monitoring platforms
+- Real time biomedical signal analytics systems
+- CPU based medical inference engines
+- Intelligent monitoring interfaces for clinical environments
+
+## Societal Applications
+
+- Early detection of cardiac abnormalities
+- Affordable cardiac monitoring in low resource regions
+- Remote healthcare and telemedicine support
+- Continuous monitoring for elderly populations
+- Preventive healthcare through real time analytics
 
 ---
 
