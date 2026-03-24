@@ -9,7 +9,7 @@
 ![PyQtGraph](https://img.shields.io/badge/PyQtGraph-Live_Dashboard-41CD52?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
-*Monitors multiple patients simultaneously, classifies cardiac rhythms using a trained CNN, and flags clinical alarms in real time — runs entirely on CPU.*
+*Monitors multiple patients simultaneously, classifies cardiac rhythms using a trained CNN, and flags clinical alarms in real time; runs entirely on CPU.*
 
 </div>
 
