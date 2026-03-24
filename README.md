@@ -67,7 +67,7 @@ A 1D CNN trained on real annotated beats from MIT-BIH. Each beat is labeled usin
 **Architecture:** Conv1D(32) → BatchNorm → MaxPool → Conv1D(64) → GlobalAvgPool → Dense(64) → Softmax(4)  
 **Epochs:** 6 | **Batch size:** 128 | **Optimizer:** Adam
 
-The model saves to `ecg_clinical_cpu.keras` after the first training run. Every run after that loads the saved model — no retraining.
+The model saves to `ecg_clinical_cpu.keras` after the first training run. Every run after that loads the saved model; no retraining.
 
 ---
 
