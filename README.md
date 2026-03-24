@@ -97,7 +97,7 @@ This prevents the model from silently missing a dangerous condition when it make
 
 - Multiple patients monitored at the same time via threading
 - CNN trained on real MIT-BIH beat annotations, not synthetic data
-- AFib detection using HRV (SDNN + RMSSD) — not just the model output
+- AFib detection using HRV (SDNN + RMSSD) not just the model output
 - Waveform goes red the moment a clinical alarm triggers
 - Model trains once and reloads on all future runs automatically
 - Runs entirely on CPU, no GPU dependency
