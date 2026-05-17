@@ -417,6 +417,6 @@ If `cardiosentinel_v2.onnx` is not present, it is generated automatically from t
 
 **Vaibhav Krishna V**  
 Electronics and Communication Engineer
-[GitHub](https://github.com/vaibhavkrishnav) · [LinkedIn](https://linkedin.com/in/vaibhavkrishnav)
+[GitHub](https://github.com/vaibhav-krishna-v ) · [LinkedIn](https://linkedin.com/in/vkv078 )
 
 > *Built on the principle that a clinical monitoring system is only as trustworthy as the depth of medical knowledge embedded in every decision it makes — from threshold to treatment window to audit trail.*
